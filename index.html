@@ -9,10 +9,18 @@
   <body>
     <div id="app">
       <!-- Map container -->
-      <div id="map"></div>
+      <div id="map" aria-label="Map showing player location and caches"></div>
       
       <!-- Status panel for displaying player points -->
-      <div id="statusPanel">Loading...</div>
+      <div id="statusPanel" aria-live="polite">Loading...</div>
+
+      <!-- Control panel for player movement -->
+      <div id="controlPanel" aria-label="Player movement controls">
+        <button id="moveNorth" aria-label="Move North">⬆️</button>
+        <button id="moveSouth" aria-label="Move South">⬇️</button>
+        <button id="moveWest" aria-label="Move West">⬅️</button>
+        <button id="moveEast" aria-label="Move East">➡️</button>
+      </div>
     </div>
     
     <script type="module" src="/src/main.ts"></script>

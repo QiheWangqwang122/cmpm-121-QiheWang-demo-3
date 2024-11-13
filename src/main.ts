@@ -5,13 +5,18 @@ import "./style.css";
 import "./leafletWorkaround.ts";
 import luck from "./luck.ts";
 
-// Cell interface
+// Define interfaces for Cell and Coin
 interface Cell {
   readonly i: number;
   readonly j: number;
 }
 
-// Cell storage using Flyweight pattern (without a class)
+interface Coin {
+  cell: Cell;
+  serial: string;
+}
+
+// Cell storage using Flyweight pattern
 const cellCache: Map<string, Cell> = new Map();
 
 // Function to retrieve or create a unique cell
@@ -25,7 +30,6 @@ function getCell(i: number, j: number): Cell {
 
 // Set initial parameters
 const OAKES_CLASSROOM = leaflet.latLng(36.98949379578401, -122.06277128548504);
-const GAMEPLAY_ZOOM_LEVEL = 19;
 const TILE_DEGREES = 1e-4;
 const NEIGHBORHOOD_SIZE = 8;
 const CACHE_SPAWN_PROBABILITY = 0.1;
@@ -33,14 +37,14 @@ const CACHE_SPAWN_PROBABILITY = 0.1;
 // Initialize map
 const map = leaflet.map(document.getElementById("map")!, {
   center: OAKES_CLASSROOM,
-  zoom: GAMEPLAY_ZOOM_LEVEL,
-  minZoom: GAMEPLAY_ZOOM_LEVEL,
-  maxZoom: GAMEPLAY_ZOOM_LEVEL,
+  zoom: 19,
+  minZoom: 19,
+  maxZoom: 19,
   zoomControl: false,
   scrollWheelZoom: false,
 });
 
-// Add a background tile layer
+// Add background tile layer
 leaflet
   .tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
@@ -54,13 +58,80 @@ const playerMarker = leaflet.marker(OAKES_CLASSROOM);
 playerMarker.bindTooltip("That's you!");
 playerMarker.addTo(map);
 
+// Status panel setup
 let playerPoints = 0;
 const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!;
 statusPanel.innerHTML = "No points yet...";
 
+// Player inventory to store collected coins
+const playerInventory: Coin[] = [];
+
+// Cache storage
+const caches: { cell: Cell; coins: Coin[]; pointValue: number }[] = [];
+
+// Function to collect a coin from a cache
+function collect(cell: Cell, coinId: string) {
+  // Find the cache at the given cell
+  const cache = caches.find((c) => c.cell.i === cell.i && c.cell.j === cell.j);
+  if (cache && cache.pointValue > 0) {
+    const coin: Coin = { cell, serial: coinId };
+    playerInventory.push(coin);
+    playerPoints = playerInventory.length;
+    statusPanel.innerHTML = `${playerPoints} points accumulated`;
+
+    // Decrease the cache's value
+    cache.pointValue -= 1;
+    updateCachePopup(cache);
+  } else {
+    console.log("No coins to collect or cache value is zero");
+  }
+}
+
+// Function to deposit a coin into a cache
+function deposit(cell: Cell) {
+  if (playerInventory.length > 0) {
+    const coin = playerInventory.pop();
+    if (coin) {
+      playerPoints = playerInventory.length;
+      statusPanel.innerHTML = `${playerPoints} points accumulated`;
+
+      // Find the cache at the given cell and add the coin to its inventory
+      const cache = caches.find(
+        (c) => c.cell.i === cell.i && c.cell.j === cell.j,
+      );
+      if (cache) {
+        cache.coins.push(coin);
+        cache.pointValue += 1; // Increment the cache's value
+        updateCachePopup(cache);
+        console.log(
+          `Deposited coin ${coin.serial} into cache at cell ${cell.i},${cell.j}`,
+        );
+      }
+    }
+  } else {
+    console.log("No coins to deposit");
+  }
+}
+
+// Function to update the cache popup with the current value
+function updateCachePopup(cache: {
+  cell: Cell;
+  coins: Coin[];
+  pointValue: number;
+}) {
+  const popupDiv = document.querySelector<HTMLDivElement>(
+    `#popup-${cache.cell.i}-${cache.cell.j}`,
+  );
+  if (popupDiv) {
+    const valueSpan = popupDiv.querySelector<HTMLSpanElement>("#value");
+    if (valueSpan) {
+      valueSpan.innerHTML = cache.pointValue.toString();
+    }
+  }
+}
 // Function to spawn a cache at a specific location
 function spawnCache(i: number, j: number) {
-  const cell = getCell(i, j); // Use Flyweight pattern for unique cells
+  const cell = getCell(i, j);
   const bounds = leaflet.latLngBounds([
     [
       OAKES_CLASSROOM.lat + cell.i * TILE_DEGREES,
@@ -72,41 +143,44 @@ function spawnCache(i: number, j: number) {
     ],
   ]);
 
-  // Add cache rectangle to the map
   const rect = leaflet.rectangle(bounds);
   rect.addTo(map);
 
-  // Track each coin's unique identifier
   let coinCount = 0;
+  const pointValue = Math.floor(
+    luck([cell.i, cell.j, "initialValue"].toString()) * 100,
+  );
+
+  const cache = { cell, coins: [], pointValue };
+  caches.push(cache);
 
   rect.bindPopup(() => {
     const coinId = `${cell.i}:${cell.j}#${coinCount}`;
-    let pointValue = Math.floor(
-      luck([cell.i, cell.j, "initialValue"].toString()) * 100,
-    );
-
     const popupDiv = document.createElement("div");
+    popupDiv.id = `popup-${cell.i}-${cell.j}`;
     popupDiv.innerHTML = `
-        <div>Cache at "${cell.i},${cell.j}" with value: <span id="value">${pointValue}</span></div>
-        <div>Coin ID: ${coinId}</div>
-        <button id="poke">poke</button>`;
+      <div>Cache at "${cell.i},${cell.j}". Value: <span id="value">${pointValue}</span></div>
+      <button id="collect">Collect</button>
+      <button id="deposit">Deposit</button>`;
 
     popupDiv
-      .querySelector<HTMLButtonElement>("#poke")!
+      .querySelector<HTMLButtonElement>("#collect")!
       .addEventListener("click", () => {
-        pointValue--;
-        popupDiv.querySelector<HTMLSpanElement>("#value")!.innerHTML =
-          pointValue.toString();
-        playerPoints++;
-        statusPanel.innerHTML = `${playerPoints} points accumulated`;
+        collect(cell, coinId);
         coinCount++;
+      });
+
+    popupDiv
+      .querySelector<HTMLButtonElement>("#deposit")!
+      .addEventListener("click", () => {
+        deposit(cell);
       });
 
     return popupDiv;
   });
 }
 
-// Generate nearby caches based on probability
+// Look around the player's neighborhood for caches to spawn
 for (let i = -NEIGHBORHOOD_SIZE; i < NEIGHBORHOOD_SIZE; i++) {
   for (let j = -NEIGHBORHOOD_SIZE; j < NEIGHBORHOOD_SIZE; j++) {
     if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
