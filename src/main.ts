@@ -48,13 +48,21 @@ leaflet
   .addTo(map);
 
 // Player marker
+// Initialize player position (saved or default)
+const playerPosition = leaflet.latLng(
+  Number(localStorage.getItem("playerLat")) || CLASSROOM_LOCATION.lat,
+  Number(localStorage.getItem("playerLng")) || CLASSROOM_LOCATION.lng,
+);
+
+// Player marker
 const initPlayerMarker = (position: leaflet.LatLng) => {
   const marker = leaflet.marker(position);
   marker.bindTooltip("That's you!");
   marker.addTo(map);
+  return marker; // Return the marker reference
 };
 
-initPlayerMarker(CLASSROOM_LOCATION);
+const playerMarker = initPlayerMarker(playerPosition);
 
 // Status feedback panel for players
 const setupStatusPanel = () => {
@@ -361,6 +369,48 @@ function updateCoinCountDisplay(lat: number, lng: number, coinCount: number) {
     coinCountElem.textContent = `${coinCount}`;
   }
 }
+// Movement mechanics: Add discrete player movements using arrow keys
+// Initialize player position (saved or default)
 
+// Movement mechanics: Add discrete player movements using arrow keys
+document.addEventListener("keydown", (event) => {
+  const MOVE_STEP = TILE_UNIT; // Step size for movement
+  let newLat = playerPosition.lat;
+  let newLng = playerPosition.lng;
+
+  switch (event.key) {
+    case "ArrowUp":
+      newLat += MOVE_STEP;
+      break;
+    case "ArrowDown":
+      newLat -= MOVE_STEP;
+      break;
+    case "ArrowLeft":
+      newLng -= MOVE_STEP;
+      break;
+    case "ArrowRight":
+      newLng += MOVE_STEP;
+      break;
+    default:
+      return; // Exit if any other key is pressed
+  }
+
+  // Update player position
+  playerPosition.lat = newLat;
+  playerPosition.lng = newLng;
+  playerMarker.setLatLng(playerPosition);
+  map.panTo(playerPosition);
+
+  // Save player position to localStorage for persistence
+  localStorage.setItem("playerLat", String(newLat));
+  localStorage.setItem("playerLng", String(newLng));
+
+  // Update status panel
+  statusPanel.innerHTML = `Player moved to (${
+    newLat.toFixed(
+      5,
+    )
+  }, ${newLng.toFixed(5)})`;
+});
 // Begin the cache generation process
 initiateCaches(CLASSROOM_LOCATION, NEIGHBORHOOD_SIZE, TILE_UNIT);
