@@ -5,6 +5,7 @@ import "./style.css";
 import "./leafletWorkaround.ts";
 import luck from "./luck.ts";
 
+// Initialize the app
 const initializeApp = (title: string) => {
   const app: HTMLDivElement = document.querySelector("#app")!;
   document.title = title;
@@ -25,7 +26,7 @@ const TILE_UNIT = 1e-4;
 const NEIGHBORHOOD_SIZE = 8;
 const CACHE_ODDS = 0.1;
 
-// Map creation using Leaflet
+// Leaflet map setup
 const createMap = (center: leaflet.LatLng) =>
   leaflet.map(document.getElementById("map")!, {
     center,
@@ -38,7 +39,7 @@ const createMap = (center: leaflet.LatLng) =>
 
 const map = createMap(CLASSROOM_LOCATION);
 
-// Layer addition for the map
+// Add tiles to map
 leaflet
   .tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
@@ -47,24 +48,7 @@ leaflet
   })
   .addTo(map);
 
-// Player marker
-// Initialize player position (saved or default)
-const playerPosition = leaflet.latLng(
-  Number(localStorage.getItem("playerLat")) || CLASSROOM_LOCATION.lat,
-  Number(localStorage.getItem("playerLng")) || CLASSROOM_LOCATION.lng,
-);
-
-// Player marker
-const initPlayerMarker = (position: leaflet.LatLng) => {
-  const marker = leaflet.marker(position);
-  marker.bindTooltip("That's you!");
-  marker.addTo(map);
-  return marker; // Return the marker reference
-};
-
-const playerMarker = initPlayerMarker(playerPosition);
-
-// Status feedback panel for players
+// Status panel
 const setupStatusPanel = () => {
   const statusPanel: HTMLDivElement = document.querySelector("#statusPanel")!;
   statusPanel.innerHTML = "Player has no coins";
@@ -97,11 +81,35 @@ interface UserTreasure {
   originalLng: number;
 }
 
-// Manage and maintain caches and player inventory
+// Cache and player data
 const caches: Map<string, GameCache> = new Map();
 const playerTreasures: UserTreasure[] = [];
 
-// Factory class for creating cache definitions
+// Cache manager to save/restore state
+class CacheMemento {
+  treasures: Coin[];
+
+  constructor(treasures: Coin[]) {
+    this.treasures = treasures.map((t) => ({ ...t })); // Deep copy for immutability
+  }
+}
+
+class CacheManager {
+  private cacheStates: Map<string, CacheMemento> = new Map();
+
+  saveCacheState(key: string, cache: GameCache): void {
+    this.cacheStates.set(key, new CacheMemento(cache.treasures));
+  }
+
+  restoreCacheState(key: string): Coin[] {
+    const state = this.cacheStates.get(key);
+    return state ? state.treasures : [];
+  }
+}
+
+const cacheManager = new CacheManager();
+
+// Factory class for creating cache types
 class CacheDesign {
   private static types: Map<string, CacheDefinition> = new Map();
 
@@ -124,8 +132,7 @@ class CacheDesign {
         )
       })</p>
           <p>Coins: <span id="coin-count-${coordinates.lat},${coordinates.lng}">${treasures.length}</span></p>
-          <div class="scroll-container">
-            <ul>${
+          <ul>${
         treasures
           .map(
             (coin) =>
@@ -137,11 +144,9 @@ class CacheDesign {
           )
           .join("")
       }</ul>
-          </div>
           <button id="add-coin-${coordinates.lat},${coordinates.lng}">Collect Coin</button>
           <button id="remove-coin-${coordinates.lat},${coordinates.lng}">Deposit Coin</button>
-        </div>
-      `;
+        </div>`;
 
       foundType = { icon: generatedIcon, template };
       CacheDesign.types.set(url, foundType);
@@ -151,266 +156,233 @@ class CacheDesign {
   }
 }
 
-// Cache generation process
-const initiateCaches = (
+// Player class for movement logic
+class Player {
+  position: leaflet.LatLng;
+  marker: leaflet.Marker;
+  map: leaflet.Map;
+
+  constructor(initialPosition: leaflet.LatLng, mapInstance: leaflet.Map) {
+    this.position = initialPosition;
+    this.map = mapInstance;
+
+    this.marker = leaflet.marker(this.position).addTo(this.map);
+    this.marker.bindTooltip("That's you!");
+  }
+
+  move(
+    direction: "north" | "south" | "east" | "west",
+    granularity: number,
+  ): void {
+    switch (direction) {
+      case "north":
+        this.position = leaflet.latLng(
+          this.position.lat + granularity,
+          this.position.lng,
+        );
+        break;
+      case "south":
+        this.position = leaflet.latLng(
+          this.position.lat - granularity,
+          this.position.lng,
+        );
+        break;
+      case "east":
+        this.position = leaflet.latLng(
+          this.position.lat,
+          this.position.lng + granularity,
+        );
+        break;
+      case "west":
+        this.position = leaflet.latLng(
+          this.position.lat,
+          this.position.lng - granularity,
+        );
+        break;
+    }
+
+    this.marker.setLatLng(this.position);
+    this.map.setView(this.position);
+
+    console.info("Player moved to:", this.position);
+  }
+}
+
+// Cache regeneration logic
+function regenerateCaches(
+  playerPosition: leaflet.LatLng,
+  vicinity: number,
+  tileSize: number,
+) {
+  caches.forEach((_, cacheKey) => {
+    const [lat, lng] = cacheKey.split(",").map(Number);
+    const cacheLatLng = leaflet.latLng(lat, lng);
+    const distance = calculateDistance(playerPosition, cacheLatLng);
+
+    if (distance > vicinity * tileSize) {
+      const cacheToSave = caches.get(cacheKey);
+      if (cacheToSave) {
+        cacheManager.saveCacheState(cacheKey, cacheToSave);
+        map.removeLayer(cacheToSave.markerInstance);
+        caches.delete(cacheKey);
+      }
+    }
+  });
+
+  initiateCaches(playerPosition, vicinity, tileSize);
+}
+
+function initiateCaches(
   origin: leaflet.LatLng,
   vicinity: number,
   tileSize: number,
-) => {
+) {
   for (let dx = -vicinity; dx <= vicinity; dx++) {
     for (let dy = -vicinity; dy <= vicinity; dy++) {
       const adjustedLat = origin.lat + dx * tileSize;
       const adjustedLng = origin.lng + dy * tileSize;
-      const cachePosition = `${adjustedLat},${adjustedLng}`;
+      const cacheKey = `${adjustedLat},${adjustedLng}`;
 
-      if (!caches.has(cachePosition)) {
-        const probability = luck(cachePosition);
-        if (probability < CACHE_ODDS) {
-          const numOfCoins = Math.floor(
-            luck([adjustedLat, adjustedLng, "init"].toString()) * 100,
-          ) + 1;
-          const coins: Coin[] = Array.from(
-            { length: numOfCoins },
-            (_, idx) => ({
-              id: idx,
+      if (!caches.has(cacheKey)) {
+        const treasures = cacheManager.restoreCacheState(cacheKey);
+        if (treasures.length === 0 && luck(cacheKey) < CACHE_ODDS) {
+          const numCoins = Math.floor(luck(cacheKey) * 100) + 1;
+          treasures.push(
+            ...Array.from({ length: numCoins }, (_, id) => ({
+              id,
               originalLat: adjustedLat,
               originalLng: adjustedLng,
-            }),
+            })),
           );
+        }
 
-          const cacheDef = CacheDesign.fetchCacheType(
+        if (treasures.length > 0) {
+          const cacheType = CacheDesign.fetchCacheType(
             "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png",
           );
-          const newMarker = leaflet
+
+          const marker = leaflet
             .marker(leaflet.latLng(adjustedLat, adjustedLng), {
-              icon: cacheDef.icon,
+              icon: cacheType.icon,
             })
             .addTo(map);
 
-          newMarker.bindPopup(
-            cacheDef.template(leaflet.latLng(adjustedLat, adjustedLng), coins),
+          marker.bindPopup(
+            cacheType.template(
+              leaflet.latLng(adjustedLat, adjustedLng),
+              treasures,
+            ),
+          );
+          marker.on(
+            "popupopen",
+            () => setupPopupListeners(adjustedLat, adjustedLng),
           );
 
-          newMarker.on("popupopen", () => {
-            const collectButton = document.getElementById(
-              `add-coin-${adjustedLat},${adjustedLng}`,
-            );
-            const depositButton = document.getElementById(
-              `remove-coin-${adjustedLat},${adjustedLng}`,
-            );
-
-            collectButton?.addEventListener("click", () => {
-              pickUpCoins(adjustedLat, adjustedLng);
-            });
-
-            depositButton?.addEventListener("click", () => {
-              if (playerTreasures.length > 0) {
-                returnCoin(adjustedLat, adjustedLng);
-              }
-            });
-          });
-
-          caches.set(cachePosition, {
-            treasures: coins,
-            markerInstance: newMarker,
-          });
+          caches.set(cacheKey, { treasures, markerInstance: marker });
         }
       }
     }
   }
-};
-
-// Function to refresh cache popup content
-function updatePopup(lat: number, lng: number) {
-  const cacheKey = `${lat},${lng}`;
-  const activeCache = caches.get(cacheKey);
-
-  if (activeCache) {
-    const newPopup = `
-      <p>Cache located at (${lat.toFixed(5)}, ${lng.toFixed(5)})</p>
-      <p>Coins: <span id="coin-count-${lat},${lng}">${activeCache.treasures.length}</span></p>
-      <div class="scroll-container">
-        <ul>${
-      activeCache.treasures
-        .map(
-          (coin) =>
-            `<li>ID: ${coin.id} - Location: (${
-              coin.originalLat.toFixed(
-                5,
-              )
-            }, ${coin.originalLng.toFixed(5)})</li>`,
-        )
-        .join("")
-    }</ul>
-      </div>
-      <button id="add-coin-${lat},${lng}">Collect Coin</button>
-      <button id="remove-coin-${lat},${lng}">Deposit Coin</button>
-    `;
-    const currentPop = activeCache.markerInstance.getPopup();
-    if (!currentPop) {
-      activeCache.markerInstance.bindPopup(newPopup).openPopup();
-    } else {
-      currentPop.setContent(newPopup);
-    }
-  }
 }
 
-// Player interaction functions
+// Helper for setting up listeners on cache popups
+function setupPopupListeners(lat: number, lng: number) {
+  const collectButton = document.getElementById(`add-coin-${lat},${lng}`);
+  const depositButton = document.getElementById(`remove-coin-${lat},${lng}`);
+
+  collectButton?.addEventListener("click", () => pickUpCoins(lat, lng));
+  depositButton?.addEventListener("click", () => returnCoin(lat, lng));
+}
+
+// Function to calculate distance between two points
+function calculateDistance(coord1: leaflet.LatLng, coord2: leaflet.LatLng) {
+  return coord1.distanceTo(coord2);
+}
+
+// Function to collect a coin from a cache
 function pickUpCoins(lat: number, lng: number) {
   const cacheKey = `${lat},${lng}`;
-  const activeCache = caches.get(cacheKey);
+  const cache = caches.get(cacheKey);
 
-  if (activeCache && activeCache.treasures.length > 0) {
-    const coin = activeCache.treasures.pop(); // Retrieve a coin from the cache
-
+  if (cache && cache.treasures.length > 0) {
+    const coin = cache.treasures.pop(); // Remove a coin from the cache
     if (coin) {
-      playerTreasures.push({
+      const userTreasure: UserTreasure = {
         id: coin.id,
-        coordinates: leaflet.latLng(lat, lng),
+        coordinates: leaflet.latLng(lat, lng), // Add coordinates
         originalLat: coin.originalLat,
         originalLng: coin.originalLng,
-      });
+      };
 
-      updatePopup(lat, lng); // Update popup content dynamically
+      playerTreasures.push(userTreasure); // Push to player inventory
+      updatePopup(lat, lng);
       statusPanel.innerHTML = `Collected coin #${coin.id} from (${
         lat.toFixed(
           5,
         )
       }, ${lng.toFixed(5)})`;
-
-      console.info(
-        `Coins left in cache (${lat}, ${lng}):`,
-        activeCache.treasures,
-      );
-      console.info("Player's Coin Inventory:", playerTreasures);
-
-      const countDisplay = document.getElementById(`coin-count-${lat},${lng}`);
-      if (countDisplay) {
-        countDisplay.textContent = `${activeCache.treasures.length}`;
-      }
     }
   }
 }
 
-// Function to deposit a coin from the user's inventory into the designated cache
+// Function to deposit a coin back into a cache
 function returnCoin(lat: number, lng: number) {
-  const positionKey = `${lat},${lng}`;
-  const currentCache = caches.get(positionKey);
+  const cacheKey = `${lat},${lng}`;
+  const cache = caches.get(cacheKey);
 
-  if (!currentCache || playerTreasures.length === 0) {
-    statusPanel.innerHTML = "No coins available for deposit!";
-    return;
-  }
+  if (cache && playerTreasures.length > 0) {
+    const treasure = playerTreasures.pop(); // Remove the last user treasure
+    if (treasure) {
+      const coin: Coin = {
+        id: treasure.id,
+        originalLat: treasure.originalLat,
+        originalLng: treasure.originalLng,
+      };
 
-  // Extract the last coin from the user's inventory
-  const userCoinIndex = playerTreasures.length - 1;
-  const coinToDeposit = playerTreasures.splice(userCoinIndex, 1)[0];
-
-  // Adding the extracted user coin back into the cache
-  const { treasures: cacheCoins, markerInstance: marker } = currentCache;
-  cacheCoins.push({
-    id: coinToDeposit.id,
-    originalLat: coinToDeposit.originalLat,
-    originalLng: coinToDeposit.originalLng,
-  });
-
-  // Update UI elements and status
-  refreshPopupUI(lat, lng, marker.getPopup(), cacheCoins);
-  statusPanel.innerHTML = `Deposited coin #${coinToDeposit.id} into cache at (${
-    lat.toFixed(5)
-  }, ${lng.toFixed(5)})`;
-
-  // Console log for debugging
-  console.info(
-    `Cache (${lat}, ${lng}) updated with deposited coin. Current cache:`,
-    cacheCoins,
-  );
-  console.info("Updated User Coins:", playerTreasures);
-
-  // Update coin count in DOM
-  updateCoinCountDisplay(lat, lng, cacheCoins.length);
-}
-
-// Helper function to refresh popup UI content
-function refreshPopupUI(
-  lat: number,
-  lng: number,
-  popup: leaflet.Popup,
-  cacheCoins: Coin[],
-) {
-  const refreshedContent = `
-    <p>Cache at (${lat.toFixed(5)}, ${lng.toFixed(5)})</p>
-    <p>Coins: <span id="coin-count-${lat},${lng}">${cacheCoins.length}</span></p>
-    <div class="scroll-container">
-      <ul>${
-    cacheCoins
-      .map(
-        (coin) =>
-          `<li>Serial: ${coin.id} - Location: (${
-            coin.originalLat.toFixed(
-              5,
-            )
-          }, ${coin.originalLng.toFixed(5)})</li>`,
-      )
-      .join("")
-  }</ul>
-    </div>
-    <button id="add-coin-${lat},${lng}">Collect Coin</button>
-    <button id="remove-coin-${lat},${lng}">Deposit Coin</button>
-  `;
-
-  popup.setContent(refreshedContent);
-}
-
-// Helper function to update the coin count display in DOM
-function updateCoinCountDisplay(lat: number, lng: number, coinCount: number) {
-  const coinCountElem = document.getElementById(`coin-count-${lat},${lng}`);
-  if (coinCountElem) {
-    coinCountElem.textContent = `${coinCount}`;
+      cache.treasures.push(coin); // Add back to the cache
+      updatePopup(lat, lng);
+      statusPanel.innerHTML = `Deposited coin #${treasure.id} into cache (${
+        lat.toFixed(5)
+      }, ${lng.toFixed(5)})`;
+    }
   }
 }
-// Movement mechanics: Add discrete player movements using arrow keys
-// Initialize player position (saved or default)
 
-// Movement mechanics: Add discrete player movements using arrow keys
-document.addEventListener("keydown", (event) => {
-  const MOVE_STEP = TILE_UNIT; // Step size for movement
-  let newLat = playerPosition.lat;
-  let newLng = playerPosition.lng;
+// Helper for updating cache popups
+function updatePopup(lat: number, lng: number) {
+  const cacheKey = `${lat},${lng}`;
+  const cache = caches.get(cacheKey);
 
-  switch (event.key) {
+  if (cache) {
+    const updatedContent = `
+      <p>Cache at (${lat.toFixed(5)}, ${lng.toFixed(5)})</p>
+      <p>Coins: <span id="coin-count-${lat},${lng}">${cache.treasures.length}</span></p>
+    `;
+    const popup = cache.markerInstance.getPopup();
+    if (popup) popup.setContent(updatedContent);
+  }
+}
+
+// Initialize map, player, and caches
+const player = new Player(CLASSROOM_LOCATION, map);
+initiateCaches(CLASSROOM_LOCATION, NEIGHBORHOOD_SIZE, TILE_UNIT);
+
+// Keyboard listener for player movement
+document.addEventListener("keydown", (e) => {
+  const MOVEMENT_UNIT = TILE_UNIT;
+  switch (e.key) {
     case "ArrowUp":
-      newLat += MOVE_STEP;
+      player.move("north", MOVEMENT_UNIT);
       break;
     case "ArrowDown":
-      newLat -= MOVE_STEP;
+      player.move("south", MOVEMENT_UNIT);
       break;
     case "ArrowLeft":
-      newLng -= MOVE_STEP;
+      player.move("west", MOVEMENT_UNIT);
       break;
     case "ArrowRight":
-      newLng += MOVE_STEP;
+      player.move("east", MOVEMENT_UNIT);
       break;
-    default:
-      return; // Exit if any other key is pressed
   }
-
-  // Update player position
-  playerPosition.lat = newLat;
-  playerPosition.lng = newLng;
-  playerMarker.setLatLng(playerPosition);
-  map.panTo(playerPosition);
-
-  // Save player position to localStorage for persistence
-  localStorage.setItem("playerLat", String(newLat));
-  localStorage.setItem("playerLng", String(newLng));
-
-  // Update status panel
-  statusPanel.innerHTML = `Player moved to (${
-    newLat.toFixed(
-      5,
-    )
-  }, ${newLng.toFixed(5)})`;
+  regenerateCaches(player.position, NEIGHBORHOOD_SIZE, TILE_UNIT);
 });
-// Begin the cache generation process
-initiateCaches(CLASSROOM_LOCATION, NEIGHBORHOOD_SIZE, TILE_UNIT);
