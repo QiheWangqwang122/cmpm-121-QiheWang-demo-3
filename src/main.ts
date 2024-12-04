@@ -13,6 +13,23 @@ const initializeApp = (title: string) => {
   headerElement.innerHTML = title;
   app.prepend(headerElement);
 };
+const movementHistory: leaflet.LatLng[] = [];
+let movementPolyline: leaflet.Polyline | null = null;
+
+function addToMovementHistory(position: leaflet.LatLng) {
+  movementHistory.push(position);
+
+  if (movementPolyline) {
+    movementPolyline.setLatLngs(movementHistory); // Update polyline
+  } else {
+    movementPolyline = leaflet
+      .polyline(movementHistory, {
+        color: "blue",
+        weight: 3,
+      })
+      .addTo(map); // Add the polyline to the map
+  }
+}
 
 initializeApp("Geocoin Carrier");
 
@@ -113,46 +130,68 @@ const cacheManager = new CacheManager();
 class CacheDesign {
   private static types: Map<string, CacheDefinition> = new Map();
 
+  // Create or fetch an existing cache type
   public static fetchCacheType(url: string): CacheDefinition {
     let foundType = CacheDesign.types.get(url);
+
     if (!foundType) {
-      const generatedIcon = leaflet.icon({
-        iconUrl: url,
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34],
-        tooltipAnchor: [16, -28],
-      });
-
-      const template = (coordinates: leaflet.LatLng, treasures: Coin[]) => `
-        <div id="popup-${coordinates.lat},${coordinates.lng}">
-          <p>Cache at (${coordinates.lat.toFixed(5)}, ${
-        coordinates.lng.toFixed(
-          5,
-        )
-      })</p>
-          <p>Coins: <span id="coin-count-${coordinates.lat},${coordinates.lng}">${treasures.length}</span></p>
-          <ul>${
-        treasures
-          .map(
-            (coin) =>
-              `<li>ID: ${coin.id} - Location: (${
-                coin.originalLat.toFixed(
-                  5,
-                )
-              }, ${coin.originalLng.toFixed(5)})</li>`,
-          )
-          .join("")
-      }</ul>
-          <button id="add-coin-${coordinates.lat},${coordinates.lng}">Collect Coin</button>
-          <button id="remove-coin-${coordinates.lat},${coordinates.lng}">Deposit Coin</button>
-        </div>`;
-
+      const generatedIcon = CacheDesign.createIcon(url);
+      const template = CacheDesign.createTemplate;
       foundType = { icon: generatedIcon, template };
+
       CacheDesign.types.set(url, foundType);
     }
 
     return foundType;
+  }
+
+  // Centralize icon creation logic
+  private static createIcon(url: string): leaflet.Icon {
+    return leaflet.icon({
+      iconUrl: url,
+      iconSize: [25, 41],
+      iconAnchor: [12, 41],
+      popupAnchor: [1, -34],
+      tooltipAnchor: [16, -28],
+    });
+  }
+
+  // Centralized template builder for cache popups
+  private static createTemplate(
+    coordinates: leaflet.LatLng,
+    treasures: Coin[],
+  ): string {
+    // Build treasures list dynamically
+    const treasureList = treasures
+      .map(
+        (coin) =>
+          `<li>
+            <a href="#" 
+               onclick="centerOnHomeCache(${coin.originalLat}, ${coin.originalLng}); return false;">
+               ID: ${coin.id}
+            </a> - Location: (${
+            coin.originalLat.toFixed(
+              5,
+            )
+          }, ${coin.originalLng.toFixed(5)})
+          </li>`,
+      )
+      .join("");
+
+    // Popup HTML template
+    return `
+      <div id="popup-${coordinates.lat},${coordinates.lng}">
+        <p>Cache at (${coordinates.lat.toFixed(5)}, ${
+      coordinates.lng.toFixed(
+        5,
+      )
+    })</p>
+        <p>Coins: <span id="coin-count-${coordinates.lat},${coordinates.lng}">${treasures.length}</span></p>
+        <ul>${treasureList}</ul>
+        <button id="add-coin-${coordinates.lat},${coordinates.lng}">Collect Coin</button>
+        <button id="remove-coin-${coordinates.lat},${coordinates.lng}">Deposit Coin</button>
+      </div>
+    `;
   }
 }
 
@@ -163,11 +202,12 @@ class Player {
   map: leaflet.Map;
 
   constructor(initialPosition: leaflet.LatLng, mapInstance: leaflet.Map) {
-    this.position = initialPosition;
+    this.position = initialPosition; // Initialize position
     this.map = mapInstance;
 
     this.marker = leaflet.marker(this.position).addTo(this.map);
     this.marker.bindTooltip("That's you!");
+    addToMovementHistory(this.position); // Log initial spawn position
   }
 
   move(
@@ -203,7 +243,7 @@ class Player {
 
     this.marker.setLatLng(this.position);
     this.map.setView(this.position);
-
+    addToMovementHistory(this.position); // Log position
     console.info("Player moved to:", this.position);
   }
 }
@@ -347,7 +387,27 @@ function returnCoin(lat: number, lng: number) {
     }
   }
 }
+function resetGameState() {
+  const confirmed = confirm(
+    "Are you sure you want to reset your game state? This action cannot be undone.",
+  );
+  if (confirmed) {
+    localStorage.removeItem("geocoinGameState"); // Clear saved data
+    movementHistory.length = 0; // Clear movement history
+    if (movementPolyline) {
+      movementPolyline.remove(); // Remove the polyline from the map
+      movementPolyline = null;
+    }
+    caches.clear(); // Clear caches
+    initiateCaches(CLASSROOM_LOCATION, NEIGHBORHOOD_SIZE, TILE_UNIT); // Reset caches
+    playerTreasures.length = 0; // Reset treasures
+    player.position = CLASSROOM_LOCATION; // Reset player position
+    player.marker.setLatLng(CLASSROOM_LOCATION);
+    map.setView(CLASSROOM_LOCATION);
 
+    alert("Game state has been reset.");
+  }
+}
 // Helper for updating cache popups
 function updatePopup(lat: number, lng: number) {
   const cacheKey = `${lat},${lng}`;
@@ -366,13 +426,44 @@ function updatePopup(lat: number, lng: number) {
 // Initialize map, player, and caches
 const player = new Player(CLASSROOM_LOCATION, map);
 initiateCaches(CLASSROOM_LOCATION, NEIGHBORHOOD_SIZE, TILE_UNIT);
+let geoWatchId: number | null = null;
 
+// Start geolocation tracking
+function startGeolocationTracking() {
+  if (geoWatchId !== null) return; // Prevent duplicate tracking
+  if ("geolocation" in navigator) {
+    geoWatchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude: lat, longitude: lng } = position.coords;
+        const newLocation = leaflet.latLng(lat, lng);
+        player.position = newLocation;
+        player.marker.setLatLng(player.position);
+        map.setView(player.position); // Center on the player's position
+        regenerateCaches(player.position, NEIGHBORHOOD_SIZE, TILE_UNIT); // Regenerate caches for new location
+        addToMovementHistory(newLocation); // Add to movement log
+      },
+      (error) => console.warn("Geolocation error:", error.message),
+      { enableHighAccuracy: true },
+    );
+  } else {
+    alert("Geolocation is not supported by your browser.");
+  }
+}
+
+// Stop geolocation tracking
+function stopGeolocationTracking() {
+  if (geoWatchId !== null) {
+    navigator.geolocation.clearWatch(geoWatchId);
+    geoWatchId = null;
+  }
+}
 // Keyboard listener for player movement
 document.addEventListener("keydown", (e) => {
   const MOVEMENT_UNIT = TILE_UNIT;
   switch (e.key) {
     case "ArrowUp":
       player.move("north", MOVEMENT_UNIT);
+
       break;
     case "ArrowDown":
       player.move("south", MOVEMENT_UNIT);
@@ -386,3 +477,15 @@ document.addEventListener("keydown", (e) => {
   }
   regenerateCaches(player.position, NEIGHBORHOOD_SIZE, TILE_UNIT);
 });
+document.getElementById("geoButton")?.addEventListener("click", () => {
+  if (geoWatchId === null) {
+    startGeolocationTracking();
+    alert("Geolocation tracking started.");
+  } else {
+    stopGeolocationTracking();
+    alert("Geolocation tracking stopped.");
+  }
+});
+document
+  .getElementById("resetButton")
+  ?.addEventListener("click", resetGameState);
