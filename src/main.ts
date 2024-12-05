@@ -214,6 +214,12 @@ class Player {
     direction: "north" | "south" | "east" | "west",
     granularity: number,
   ): void {
+    this.updatePosition(direction, granularity);
+    this.updateMapView();
+    this.logMovement();
+  }
+
+  private updatePosition(direction: string, granularity: number): void {
     switch (direction) {
       case "north":
         this.position = leaflet.latLng(
@@ -240,11 +246,15 @@ class Player {
         );
         break;
     }
+  }
 
+  private updateMapView(): void {
     this.marker.setLatLng(this.position);
     this.map.setView(this.position);
-    addToMovementHistory(this.position); // Log position
-    console.info("Player moved to:", this.position);
+  }
+
+  private logMovement(): void {
+    addToMovementHistory(this.position); // Handles polyline logic
   }
 }
 
